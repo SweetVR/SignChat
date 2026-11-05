@@ -1,0 +1,34 @@
+name: Build Windows app
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -r requirements.txt pyinstaller pytest
+      - name: Test
+        run: python -m pytest -q
+        env:
+          QT_QPA_PLATFORM: offscreen
+      - name: Build
+        run: python -m PyInstaller --noconfirm signchat.spec
+      - name: Smoke test the exe
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:SIGNCHAT_SMOKE_EXIT_MS = "4000"
+          $p = Start-Process dist/SignChat/SignChat.exe -PassThru -Wait
+          if ($p.ExitCode -ne 0) { throw "SignChat.exe exited with $($p.ExitCode)" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SignChat-windows
+          path: dist/SignChat

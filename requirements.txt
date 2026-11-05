@@ -1,0 +1,5 @@
+numpy>=1.26
+python-osc>=1.8
+openvr>=2.5
+PySide6-Essentials>=6.6
+Pillow>=10.1

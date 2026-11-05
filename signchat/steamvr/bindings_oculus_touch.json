@@ -1,0 +1,40 @@
+{
+  "controller_type": "oculus_touch",
+  "description": "SignChat default bindings: hand skeletons, hand poses and haptics only (no buttons, so nothing in VRChat is affected).",
+  "name": "SignChat (oculus_touch)",
+  "bindings": {
+    "/actions/signchat": {
+      "poses": [
+        {
+          "output": "/actions/signchat/in/pose_left",
+          "path": "/user/hand/left/pose/raw"
+        },
+        {
+          "output": "/actions/signchat/in/pose_right",
+          "path": "/user/hand/right/pose/raw"
+        }
+      ],
+      "skeleton": [
+        {
+          "output": "/actions/signchat/in/skeleton_left",
+          "path": "/user/hand/left/input/skeleton/left"
+        },
+        {
+          "output": "/actions/signchat/in/skeleton_right",
+          "path": "/user/hand/right/input/skeleton/right"
+        }
+      ],
+      "haptics": [
+        {
+          "output": "/actions/signchat/out/haptic_left",
+          "path": "/user/hand/left/output/haptic"
+        },
+        {
+          "output": "/actions/signchat/out/haptic_right",
+          "path": "/user/hand/right/output/haptic"
+        }
+      ],
+      "sources": []
+    }
+  }
+}
