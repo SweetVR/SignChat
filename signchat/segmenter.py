@@ -81,6 +81,20 @@ class LetterSegmenter:
         self.still_time = 0.0
         self.bounce_ok = False   # moving back after J/Z must not repeat the shape it ended in
 
+    def after_sign(self, t: float, end_shape: str | None) -> None:
+        """A whole sign was recognised. If the hand is still in the handshape the
+        sign ended with, don't type that handshape as a letter."""
+        self.has_text = True
+        self.last_commit_t = t
+        self.still_time = 0.0
+        if end_shape is not None and end_shape in (self.cand, self.smoothed, self.last_label):
+            self.last_label = end_shape
+            self.released = False
+            self.bounce_ok = False
+            self.diff_since = None
+            self.win.clear()
+            self.hold_progress = 0.0
+
     def _smooth(self, label: str | None) -> str | None:
         self.hist.append(label)
         counts = Counter(x for x in self.hist if x is not None)

@@ -50,7 +50,19 @@ def render_hud(state: dict) -> Image.Image:
     d.rounded_rectangle((0, 0, W - 1, H - 1), radius=28, fill=BG)
 
     rec = state.get("rec")
-    if rec:
+    if rec and rec.get("kind") == "sign":
+        phase = rec["phase"]
+        accent = AMBER if phase != "capture" else RED
+        progress = rec.get("progress", 0.0)
+        take = f"  {rec.get('take_no', 1)}/{rec.get('takes_total', 1)}"
+        gloss = rec["label"]
+        if phase == "countdown":
+            big, title, line = str(max(1, math.ceil(rec.get("remaining", 0)))), "Hands down, get ready" + take, gloss
+        elif phase == "capture":
+            big, title, line = "GO", "Recording" + take, f"Sign {gloss} now"
+        else:
+            big, title, line = "•", "Next sign" + take, gloss
+    elif rec:
         big = SHORT.get(rec["label"], rec["label"])
         phase = rec["phase"]
         accent = AMBER if phase != "capture" else RED
@@ -74,7 +86,7 @@ def render_hud(state: dict) -> Image.Image:
         title = "Signing" if enabled else "Paused"
         if enabled and not state.get("active", True):
             title = "Signing · hand lowered"
-        line = state.get("text") or ("Fingerspell to type" if enabled else "Press Start in SignChat")
+        line = state.get("text") or ("Sign or fingerspell" if enabled else "Press Start in SignChat")
 
     # big letter with a progress ring
     cx, cy, r = 104, H // 2, 78
@@ -91,7 +103,11 @@ def render_hud(state: dict) -> Image.Image:
     x0 = 212
     d.ellipse((x0, 40, x0 + 18, 58), fill=accent)
     d.text((x0 + 30, 49), title, font=_font(30, bold=True), fill=FG, anchor="lm")
-    f_line = _font(40)
+    size = 40
+    f_line = _font(size)
+    while size > 26 and d.textlength(line, font=f_line) > W - x0 - 28:
+        size -= 2
+        f_line = _font(size)
     d.text((x0, 132), _fit(d, line, f_line, W - x0 - 28), font=f_line, fill=FG, anchor="lm")
     return img
 

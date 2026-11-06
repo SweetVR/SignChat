@@ -110,5 +110,50 @@ def extract_features(pts: np.ndarray) -> np.ndarray:
     return np.concatenate([shape, contacts, bends, spreads, orientation]).astype(np.float32)
 
 
+def _angles_batch(u: np.ndarray, v: np.ndarray) -> np.ndarray:
+    nu = np.linalg.norm(u, axis=-1)
+    nv = np.linalg.norm(v, axis=-1)
+    cos = np.einsum("...j,...j->...", u, v) / np.maximum(nu * nv, 1e-12)
+    return np.arccos(np.clip(cos, -1.0, 1.0))
+
+
+def extract_features_batch(pts_seq: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """extract_features for many frames at once: (n, 21, 3) -> (n, FEATURE_DIM) float32,
+    plus a mask of the frames that were valid (broken frames get zeros)."""
+    P = np.asarray(pts_seq, dtype=np.float64)
+    n = len(P)
+    if n == 0:
+        return np.zeros((0, FEATURE_DIM), np.float32), np.zeros(0, bool)
+    origin = P[:, 0]
+    y = P[:, 9] - origin
+    palm = np.linalg.norm(y, axis=1)
+    ok = palm >= 1e-6
+    palm = np.where(ok, palm, 1.0)
+    y = y / palm[:, None]
+    across = P[:, 5] - P[:, 17]
+    x = across - y * np.einsum("ij,ij->i", across, y)[:, None]
+    nx = np.linalg.norm(x, axis=1)
+    bad = nx < 1e-9
+    if bad.any():
+        helper = np.where((np.abs(y[:, 0]) < 0.9)[:, None], [[1.0, 0.0, 0.0]], [[0.0, 0.0, 1.0]])
+        x = np.where(bad[:, None], np.cross(helper, y), x)
+        nx = np.linalg.norm(x, axis=1)
+    x = x / np.maximum(nx, 1e-12)[:, None]
+    z = np.cross(x, y)
+    basis = np.stack([x, y, z], axis=1)                      # (n, 3, 3), rows are the axes
+    local = np.einsum("nkj,nij->nki", P - origin[:, None, :], basis) / palm[:, None, None]
+    shape = local[:, COORD_IDX].reshape(n, -1)
+    contacts = np.linalg.norm(P[:, CONTACT_PAIRS[:, 0]] - P[:, CONTACT_PAIRS[:, 1]], axis=2) / palm[:, None]
+    p0, p1, p2 = P[:, ANGLE_TRIPLES[:, 0]], P[:, ANGLE_TRIPLES[:, 1]], P[:, ANGLE_TRIPLES[:, 2]]
+    bends = _angles_batch(p1 - p0, p2 - p1)
+    seg_a = P[:, SPREAD_SEGMENTS[:, 0, 1]] - P[:, SPREAD_SEGMENTS[:, 0, 0]]
+    seg_b = P[:, SPREAD_SEGMENTS[:, 1, 1]] - P[:, SPREAD_SEGMENTS[:, 1, 0]]
+    spreads = _angles_batch(seg_a, seg_b)
+    orientation = np.concatenate([basis[:, 1], basis[:, 2]], axis=1)
+    out = np.concatenate([shape, contacts, bends, spreads, orientation], axis=1).astype(np.float32)
+    out[~ok] = 0.0
+    return out, ok
+
+
 def extract_many(pts_seq: np.ndarray) -> np.ndarray:
-    return np.stack([extract_features(p) for p in pts_seq]) if len(pts_seq) else np.zeros((0, FEATURE_DIM), np.float32)
+    return extract_features_batch(pts_seq)[0]

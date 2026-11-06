@@ -147,5 +147,6 @@ def test_steamvr_source_with_fake_runtime(monkeypatch):
     assert f.head_relative and f.quality == "full"
     expected = local_points(LETTER_POSES["A"]) + HAND_POS - HEAD_POS
     assert np.allclose(f.points, expected, atol=1e-5)
+    assert np.allclose(f.level, np.eye(3)) and np.allclose(f.level_points(), expected, atol=1e-5)
     assert log.get("hud") and log.get("shown") is True and log.get("destroyed")
     assert len(log.get("haptics", [])) == 4      # "done" = 2 pulses x 2 hands

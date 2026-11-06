@@ -1,9 +1,15 @@
-"""Talking to VRChat over OSC.
+"""Talking to VRChat (and TTS Voice Wizard) over OSC.
 
 VRChat listens on UDP 127.0.0.1:9000.  /chatbox/input takes
 (text, send_immediately, play_notification_sound) and /chatbox/typing
 toggles the "..." typing bubble.  VRChat times out chatbox spam, so live
 updates are coalesced and rate limited.
+
+TTS Voice Wizard (https://github.com/VRCWizard/TTS-Voice-Wizard) has an OSC
+listener (port 4026 by default; turn it on in its OSC Listener settings).
+When it's used, finished messages go to TTS Voice Wizard instead of straight
+to the chatbox, and it shows, speaks and/or translates them with its own
+settings, so the two apps don't overwrite each other.
 """
 
 from __future__ import annotations
@@ -16,6 +22,8 @@ from typing import Callable
 log = logging.getLogger(__name__)
 
 SendFn = Callable[[str, list], None]
+TTSVW_SPEAK = "/TTSVoiceWizard/TextToSpeech"
+TTSVW_TEXT = "/TTSVoiceWizard/TextToText"
 
 
 def udp_sender(host: str, port: int) -> SendFn:
@@ -29,11 +37,25 @@ def udp_sender(host: str, port: int) -> SendFn:
     return send
 
 
+def ttsvw_sink(host: str = "127.0.0.1", port: int = 4026, speak: bool = True,
+               send_fn: SendFn | None = None) -> Callable[[str], None]:
+    """Finished messages -> TTS Voice Wizard's OSC listener (it uses its own voice/chatbox settings)."""
+    send = send_fn or udp_sender(host, port)
+    address = TTSVW_SPEAK if speak else TTSVW_TEXT
+
+    def sink(text: str) -> None:
+        send(address, [text])
+
+    return sink
+
+
 class ChatboxSender:
     def __init__(self, host: str = "127.0.0.1", port: int = 9000, min_interval: float = 2.0,
-                 sound_on_send: bool = False, send_fn: SendFn | None = None):
+                 sound_on_send: bool = False, send_fn: SendFn | None = None,
+                 final_sink: Callable[[str], None] | None = None):
         self.min_interval = min_interval
         self.sound_on_send = sound_on_send
+        self.final_sink = final_sink     # if set, finished messages go here instead of the chatbox
         self._send = send_fn or udp_sender(host, port)
         self._finals: deque[str] = deque()
         self._live: str | None = None
@@ -83,7 +105,13 @@ class ChatboxSender:
                     return
             else:
                 return
-            self._emit("/chatbox/input", [text[:144], True, bool(final and self.sound_on_send)])
+            if final and self.final_sink is not None:
+                try:
+                    self.final_sink(text)
+                except OSError as exc:
+                    log.warning("sending to TTS Voice Wizard failed: %s", exc)
+            else:
+                self._emit("/chatbox/input", [text[:144], True, bool(final and self.sound_on_send)])
             self._last_sent_t = now
             self._last_text = text
             if final:

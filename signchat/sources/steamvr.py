@@ -17,7 +17,7 @@ import time
 
 import numpy as np
 
-from ..hand import STEAMVR_BONE_FOR_LANDMARK, HandFrame
+from ..hand import STEAMVR_BONE_FOR_LANDMARK, HandFrame, level_rotation
 from ..paths import steamvr_manifest
 from .base import HandSource
 
@@ -228,7 +228,8 @@ class SteamVRSource(HandSource):
         pts = bones_to_view(bone_positions(bones), mat34_to_np(pose.pose.mDeviceToAbsoluteTracking), head)
         if not np.all(np.isfinite(pts)):
             return None
-        return HandFrame(now, hand, pts, head_relative=True, quality=LEVEL_NAMES.get(level, "unknown"))
+        return HandFrame(now, hand, pts, head_relative=True, quality=LEVEL_NAMES.get(level, "unknown"),
+                         level=level_rotation(head[:, :3]))
 
     def _play_haptic(self, openvr, vrinput, acts, pattern: str) -> None:
         for start, dur, freq, amp in HAPTIC_PATTERNS.get(pattern, []):

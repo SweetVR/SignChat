@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 
 from .paths import app_dir
 
@@ -45,6 +45,20 @@ class Settings:
     rest_record_s: float = 5.0
     takes_static: int = 2
     takes_motion: int = 3
+    # words & phrases
+    signs_enabled: bool = True
+    sign_tolerance: float = 1.0      # higher = accepts sloppier signs (and makes more mistakes)
+    sign_record_s: float = 3.0
+    phrase_record_s: float = 5.0
+    takes_sign: int = 3
+    # TTS Voice Wizard (https://github.com/VRCWizard/TTS-Voice-Wizard): finished messages go to it
+    ttsvw_enabled: bool = False
+    ttsvw_host: str = "127.0.0.1"
+    ttsvw_port: int = 4026
+    ttsvw_speak: bool = True         # True: TextToSpeech (speak it), False: TextToText (text only)
+    # template packs
+    active_packs: list = field(default_factory=list)
+    pack_index_url: str = "https://raw.githubusercontent.com/SweetVR/SignChat/main/packs/index.json"
     # VR extras
     hud_enabled: bool = True
     hud_distance_m: float = 0.55
@@ -62,7 +76,10 @@ class Settings:
                 known = {f.name: f.type for f in fields(cls)}
                 for k, v in data.items():
                     if k in known:
-                        setattr(s, k, type(getattr(s, k))(v))
+                        try:
+                            setattr(s, k, type(getattr(s, k))(v))
+                        except (TypeError, ValueError):
+                            log.warning("ignoring bad setting %s=%r", k, v)
             except Exception as exc:
                 log.warning("could not read settings (%s); using defaults", exc)
         return s

@@ -62,10 +62,29 @@ def test_simulated_source_drives_the_engine():
     src.start()
     try:
         src.press("A")
-        time.sleep(0.6)
+        src.perform_sign("HELLO")
+        time.sleep(1.6)
     finally:
         src.stop()
-    assert len(got) > 15 and all(f.hand == "right" for f in got)
+    right = [f for f in got if f.hand == "right"]
+    assert len(right) > 30 and {f.hand for f in got} == {"left", "right"}
+    wrists = np.array([f.points[0] for f in right])
+    assert np.ptp(wrists[:, 1]) > 0.2        # the hand came up from rest to sign
+
+
+def test_level_frame_ignores_looking_down():
+    from signchat.hand import level_rotation
+    pitch = np.radians(-40)                   # looking down at your hands
+    head = np.array([[1, 0, 0], [0, np.cos(pitch), -np.sin(pitch)], [0, np.sin(pitch), np.cos(pitch)]])
+    hand_world = np.array([0.1, -0.4, -0.3])  # relative to the eyes, in the room
+    viewer = hand_world @ head                # what the headset sees
+    level = level_rotation(head)
+    assert np.allclose(viewer @ level.T, hand_world, atol=1e-9)
+    yaw = np.radians(70)                      # turning the head left/right does turn the frame
+    r_yaw = np.array([[np.cos(yaw), 0, np.sin(yaw)], [0, 1, 0], [-np.sin(yaw), 0, np.cos(yaw)]])
+    head_yaw = r_yaw @ head
+    viewer2 = hand_world @ head_yaw
+    assert np.allclose(viewer2 @ level_rotation(head_yaw).T, hand_world @ r_yaw, atol=1e-9)
 
 
 def test_avatar_toggle_listener():

@@ -46,9 +46,36 @@ class HandFrame:
     points: np.ndarray     # (21, 3) in the viewer frame described above
     head_relative: bool = False  # True when the viewer is the headset (enables "hand lowered" checks)
     quality: str = ""      # "full", "partial", "estimated", "camera", "sim"
+    # 3x3 rotation from the viewer frame to a *level* frame: same origin and
+    # facing direction as the head, but not tilted when you look up/down or
+    # tilt your head. None = the viewer frame is already level.
+    level: np.ndarray | None = None
 
     def palm_size(self) -> float:
         return float(np.linalg.norm(self.points[9] - self.points[0]))
+
+    def level_points(self) -> np.ndarray:
+        pts = np.asarray(self.points, dtype=np.float64)
+        return pts if self.level is None else pts @ np.asarray(self.level, np.float64).T
+
+
+def level_rotation(head_rot: np.ndarray) -> np.ndarray:
+    """Rotation from the head frame to a level frame that only follows the
+    head's left/right turning (yaw), for a head rotation matrix whose columns
+    are the head's x, y, z axes in a y-up world."""
+    head_rot = np.asarray(head_rot, np.float64)
+    fwd = -head_rot[:, 2]
+    flat = np.array([fwd[0], 0.0, fwd[2]])
+    n = float(np.linalg.norm(flat))
+    if n < 1e-3:   # looking straight up or down: use the head's up axis instead
+        up = head_rot[:, 1] * (1.0 if fwd[1] < 0 else -1.0)
+        flat = np.array([up[0], 0.0, up[2]])
+        n = float(np.linalg.norm(flat)) or 1.0
+    z = -flat / n
+    y = np.array([0.0, 1.0, 0.0])
+    x = np.cross(y, z)
+    yaw_rot = np.column_stack([x, y, z])
+    return yaw_rot.T @ head_rot
 
 
 def canonical_points(frame: HandFrame) -> np.ndarray:

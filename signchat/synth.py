@@ -10,6 +10,7 @@ fingertips, +z out of the palm.  Distances in metres.
 
 from __future__ import annotations
 
+import zlib
 from dataclasses import dataclass
 
 import numpy as np
@@ -106,6 +107,7 @@ LETTER_POSES: dict[str, Pose] = {
 
 SIGN_POSITION = np.array([0.16, -0.28, -0.38])   # in front of the right shoulder, below the eyes
 REST_POSITION = np.array([0.22, -0.80, -0.15])   # hand lowered
+MIRROR = np.array([-1.0, 1.0, 1.0])
 
 
 def _rotate_towards(v: np.ndarray, target: np.ndarray, angle: float) -> np.ndarray:
@@ -179,6 +181,20 @@ class SimUser:
         rng = np.random.default_rng(self.seed)
         self.scale = float(rng.uniform(0.92, 1.08))
         self.personal = {k: self._perturb(p, rng, self.habit) for k, p in LETTER_POSES.items()}
+        self._sign_habits: dict = {}
+
+    @property
+    def other_hand(self) -> str:
+        return "left" if self.hand == "right" else "right"
+
+    def sign_habit(self, gloss: str):
+        """How this person signs a word compared with everyone else: (location offset, size, speed)."""
+        h = self._sign_habits.get(gloss)
+        if h is None:
+            rng = np.random.default_rng([self.seed, zlib.crc32(gloss.encode())])
+            h = (rng.normal(0, self.habit * 0.4, 3), float(rng.uniform(0.88, 1.12)), float(rng.uniform(0.85, 1.15)))
+            self._sign_habits[gloss] = h
+        return h
 
     @staticmethod
     def _perturb(pose: Pose, rng, amount: float) -> Pose:
@@ -223,24 +239,62 @@ class Performer:
         self.user, self.fps, self.hold_s, self.trans_s = user, fps, hold_s, trans_s
         self.pause_s, self.drop_s = pause_s, drop_s
         self.rng = np.random.default_rng(seed)
+        self.rng_n = np.random.default_rng(seed + 7919)   # the other hand has its own noise
         self.t = t0
         self.pose = user.take_pose("_rest", self.rng)
         self.pos = REST_POSITION.copy()
-        self.frames: list[HandFrame] = []
+        self.roll = 0.0
+        # the other (non-dominant) hand, in mirrored "right-handed signer" coordinates (x < 0)
+        self.npose = user.take_pose("_rest", self.rng_n)
+        self.npos = REST_POSITION * MIRROR
+        self.nroll = 0.0
+        self.other_visible = True
+        self.frames: list[HandFrame] = []          # the dominant hand
+        self.frames_n: list[HandFrame | None] = []  # the other hand at the same moments
 
-    def _emit(self, pose: Pose, pos: np.ndarray, roll: float = 0.0):
+    def _emit(self, pose: Pose, pos: np.ndarray, roll: float | None = None):
+        roll = self.roll if roll is None else roll
         pts = render(pose, pos, self.user.hand, self.user.scale, roll)
         pts = pts + self.rng.normal(0, self.user.jitter_m, pts.shape)
         self.frames.append(HandFrame(self.t, self.user.hand, pts, head_relative=True, quality="sim"))
+        if self.other_visible:
+            other = self.user.other_hand
+            npts = render(self.npose, self.npos * MIRROR, other, self.user.scale, self.nroll)
+            npts = npts + self.rng_n.normal(0, self.user.jitter_m, npts.shape)
+            self.frames_n.append(HandFrame(self.t, other, npts, head_relative=True, quality="sim"))
+        else:
+            self.frames_n.append(None)
         self.t += 1.0 / self.fps
 
+    def batches(self, start: int = 0) -> list[list[HandFrame]]:
+        """Tracking updates as an input source would deliver them (both hands)."""
+        return [[f] + ([n] if n is not None else []) for f, n in zip(self.frames[start:], self.frames_n[start:])]
+
     def _move(self, pose: Pose, pos: np.ndarray, dur: float):
-        a_pose, a_pos = self.pose, self.pos
+        a_pose, a_pos, a_roll = self.pose, self.pos, self.roll
         n = max(1, int(round(dur * self.fps)))
         for i in range(1, n + 1):
             u = _smooth(i / n)
-            self._emit(_lerp_pose(a_pose, pose, u), (1 - u) * a_pos + u * pos)
-        self.pose, self.pos = pose, pos.copy()
+            self._emit(_lerp_pose(a_pose, pose, u), (1 - u) * a_pos + u * pos, (1 - u) * a_roll)
+        self.pose, self.pos, self.roll = pose, pos.copy(), 0.0
+
+    def _move_both(self, pose: Pose, pos: np.ndarray, roll: float, npose: Pose, npos: np.ndarray,
+                   nroll: float, dur: float):
+        a_pose, a_pos, a_roll = self.pose, self.pos, self.roll
+        b_pose, b_pos, b_roll = self.npose, self.npos, self.nroll
+        n = max(1, int(round(dur * self.fps)))
+        for i in range(1, n + 1):
+            u = _smooth(i / n)
+            self.npose = _lerp_pose(b_pose, npose, u)
+            self.npos = (1 - u) * b_pos + u * npos
+            self.nroll = (1 - u) * b_roll + u * nroll
+            self._emit(_lerp_pose(a_pose, pose, u), (1 - u) * a_pos + u * pos, (1 - u) * a_roll + u * roll)
+        self.pose, self.pos, self.roll = pose, np.array(pos, float), roll
+        self.npose, self.npos, self.nroll = npose, np.array(npos, float), nroll
+
+    def lower_hands(self, dur: float = 0.4) -> None:
+        self._move_both(self.user.take_pose("_rest", self.rng), REST_POSITION, 0.0,
+                        self.user.take_pose("_rest", self.rng_n), REST_POSITION * MIRROR, 0.0, dur)
 
     def _hold(self, dur: float, drift: float = 0.002):
         n = max(1, int(round(dur * self.fps)))
@@ -265,12 +319,16 @@ class Performer:
         sign_pos = SIGN_POSITION.copy()
         for item in script:
             if isinstance(item, tuple) and item[0] == "rest":
-                self._move(self.user.take_pose("_rest", self.rng), REST_POSITION, 0.4)
+                self.lower_hands(0.4)
                 self._hold(item[1])
                 prev = None
                 continue
+            if isinstance(item, tuple) and item[0] == "sign":
+                self.sign(item[1], *item[2:])
+                prev = None
+                continue
             if item == "|":
-                self._move(self.user.take_pose("_rest", self.rng), REST_POSITION, 0.4)
+                self.lower_hands(0.4)
                 self._hold(self.drop_s)
                 prev = None
                 continue
@@ -298,8 +356,160 @@ class Performer:
             prev = label
         return self.frames
 
+    def sign(self, gloss: str, kind: str | None = None, speed: float = 1.0, trans_s: float | None = None):
+        """Sign a word or phrase, starting from wherever the hands are."""
+        parts = phrase_parts(gloss, kind)
+        for n, part in enumerate(parts):
+            self._sign_one(sign_spec(part), speed, trans_s if trans_s is not None else (0.2 if n else None))
+        return self.frames
+
+
+    def _sign_one(self, spec: SignSpec, speed: float = 1.0, trans_s: float | None = None) -> None:
+        user, rng = self.user, self.rng
+        loc_off, h_scale, h_speed = user.sign_habit(spec.gloss)
+        loc = np.array(spec.loc) + loc_off + rng.normal(0, 0.008, 3)
+        size = spec.size * h_scale * float(rng.uniform(0.93, 1.07))
+        dur = spec.dur / (h_speed * speed) * float(rng.uniform(0.9, 1.1))
+        d0 = user.take_pose(spec.d_start, rng)
+        d1 = d0 if spec.d_end == spec.d_start else user.take_pose(spec.d_end, rng)
+
+        def other_at(u):
+            if spec.two == "mirror":
+                off, roll = sign_offset(spec, u, size)
+                return (loc + off) * MIRROR, roll
+            if spec.two == "alternate":
+                off, roll = sign_offset(spec, (u + 0.5) % 1.0, size)
+                return (loc + off) * MIRROR, roll
+            if spec.two == "base":
+                return np.array(spec.n_loc) + loc_off, 0.0
+            return None, 0.0
+
+        if spec.two:
+            n0 = user.take_pose(spec.n_pose, self.rng_n)
+            npos0, nroll0 = other_at(0.0)
+        else:
+            n0 = self.npose if np.allclose(self.npos, REST_POSITION * MIRROR, atol=0.05) else \
+                user.take_pose("_rest", self.rng_n)
+            npos0, nroll0 = REST_POSITION * MIRROR, 0.0
+        trans = self.trans_s if trans_s is None else trans_s
+        self._move_both(d0, loc, 0.0, n0, npos0, nroll0, trans)
+        n = max(4, int(round(dur * self.fps)))
+        for i in range(1, n + 1):
+            u = i / n
+            off, roll = sign_offset(spec, u, size)
+            pose = d0 if d1 is d0 else _lerp_pose(d0, d1, _smooth(float(np.clip((u - 0.25) / 0.5, 0.0, 1.0))))
+            if spec.two:
+                self.npos, self.nroll = other_at(u)
+            self.pose, self.pos, self.roll = pose, loc + off, roll
+            self._emit(pose, loc + off, roll)
+        self._hold(0.08)
+
     def hold_sign(self, label: str, dur: float) -> list[HandFrame]:
         """Used for recording takes: form the sign and hold it."""
         self._move(self.user.take_pose(label, self.rng), SIGN_POSITION, self.trans_s)
         self._hold(dur)
         return self.frames
+
+
+# ---------------------------------------------------------------- whole signs
+# Made-up signs, generated from the gloss so every gloss always looks the same.
+# They are NOT real ASL; they only need to be distinct, plausible hand
+# movements (one- and two-handed, with handshape changes) to test the
+# recogniser and to let people try the app without VR.
+
+SIGN_LOCATIONS = {          # wrist positions relative to the eyes (m), right-handed signer
+    "forehead": (0.04, 0.02, -0.16), "eyes": (0.07, -0.04, -0.20), "chin": (0.03, -0.17, -0.18),
+    "cheek": (0.11, -0.10, -0.16), "chest": (0.05, -0.40, -0.24), "shoulder": (0.17, -0.27, -0.26),
+    "neutral": (0.13, -0.32, -0.40), "low": (0.11, -0.47, -0.36), "side": (0.27, -0.22, -0.33),
+}
+SIGN_SHAPES = tuple("ABCDEFGHIKLMNOPRSTUVWXY")
+_DIRS = np.array([(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, -1), (0, 0, 1)], float)
+
+
+def _unit(v) -> np.ndarray:
+    v = np.asarray(v, float)
+    return v / (np.linalg.norm(v) or 1.0)
+
+
+@dataclass(frozen=True)
+class SignSpec:
+    gloss: str
+    d_start: str            # dominant handshape (a letter pose)
+    d_end: str              # handshape at the end
+    loc: tuple
+    move: str               # line, arc, circle, tap, twist, shake
+    vec: tuple
+    vec2: tuple
+    size: float
+    dur: float
+    two: str = ""           # "", "mirror", "base" or "alternate"
+    n_pose: str = "B"
+    n_loc: tuple = (0.0, 0.0, 0.0)
+
+
+def sign_spec(gloss: str) -> SignSpec:
+    rng = np.random.default_rng(zlib.crc32(gloss.encode()))
+    d_start = str(rng.choice(SIGN_SHAPES))
+    d_end = d_start if rng.random() < 0.65 else str(rng.choice(SIGN_SHAPES))
+    loc = np.array(SIGN_LOCATIONS[str(rng.choice(list(SIGN_LOCATIONS)))]) + rng.normal(0, 0.015, 3)
+    move = str(rng.choice(["line", "line", "arc", "arc", "circle", "tap", "twist", "shake"]))
+    vec = _unit(_DIRS[rng.integers(len(_DIRS))] + rng.normal(0, 0.35, 3))
+    vec2 = _unit(np.cross(vec, _unit(rng.normal(0, 1, 3))))
+    size = {"line": rng.uniform(0.10, 0.22), "arc": rng.uniform(0.10, 0.20), "circle": rng.uniform(0.04, 0.07),
+            "tap": rng.uniform(0.03, 0.05), "twist": 0.02, "shake": rng.uniform(0.04, 0.06)}[move]
+    dur = float(rng.uniform(0.5, 0.9))
+    two, n_pose, n_loc = "", "B", REST_POSITION * MIRROR
+    if rng.random() < 0.4:
+        two = str(rng.choice(["mirror", "base", "alternate"]))
+        if two == "alternate" and move not in ("circle", "tap", "shake"):
+            two = "mirror"
+        if two == "base":
+            n_pose = str(rng.choice(["B", "A", "S", "C", "O"]))
+            n_loc = np.array([-0.05, -0.42, -0.32]) + rng.normal(0, 0.01, 3)
+            loc = np.array([0.03, -0.32, -0.32]) + rng.normal(0, 0.01, 3)
+        else:
+            n_pose = d_start
+            loc = loc.copy()
+            loc[0] = max(loc[0], 0.10)
+            n_loc = loc * MIRROR
+    return SignSpec(gloss, d_start, d_end, tuple(loc), move, tuple(vec), tuple(vec2), float(size), dur, two,
+                    n_pose, tuple(n_loc))
+
+
+def sign_offset(spec: SignSpec, u: float, size: float) -> tuple[np.ndarray, float]:
+    """Where the dominant hand is (relative to the start) at u in [0, 1], and its roll."""
+    vec, vec2 = np.array(spec.vec), np.array(spec.vec2)
+    su = _smooth(float(np.clip(u, 0.0, 1.0)))
+    if spec.move == "line":
+        return vec * size * su, 0.0
+    if spec.move == "arc":
+        return vec * size * su + vec2 * 0.35 * size * np.sin(np.pi * su), 0.0
+    if spec.move == "circle":
+        th = 2 * np.pi * u
+        return size * ((np.cos(th) - 1) * vec + np.sin(th) * vec2), 0.0
+    if spec.move == "tap":
+        return vec * size * (1 - np.cos(4 * np.pi * u)) / 2, 0.0
+    if spec.move == "shake":
+        return vec * size * np.sin(4 * np.pi * u), 0.0
+    return vec * size * su, 1.2 * su        # twist
+
+
+def phrase_parts(gloss: str, kind: str | None = None) -> list[str]:
+    """The separate signs a phrase is made of (for the simulated signer)."""
+    from .vocab import STARTER_BY_GLOSS
+    entry = STARTER_BY_GLOSS.get(gloss)
+    if kind is None:
+        kind = entry.kind if entry is not None else "word"
+    words = gloss.split("-")
+    if kind != "phrase" or len(words) < 2:
+        return [gloss]
+    parts, i = [], 0
+    while i < len(words):
+        for j in range(len(words), i, -1):
+            cand = "-".join(words[i:j])
+            e = STARTER_BY_GLOSS.get(cand)
+            if j == i + 1 or (e is not None and e.kind == "word"):
+                parts.append(cand)
+                i = j
+                break
+    return parts
